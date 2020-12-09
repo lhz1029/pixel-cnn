@@ -24,7 +24,7 @@ parser = argparse.ArgumentParser()
 # data I/O
 parser.add_argument('-i', '--data_dir', type=str, default='/local_home/tim/pxpp/data', help='Location for the dataset')
 parser.add_argument('-o', '--save_dir', type=str, default='/local_home/tim/pxpp/save', help='Location for parameter checkpoints and samples')
-parser.add_argument('-d', '--data_set', type=str, default='cifar', help='Can be either cifar|imagenet')
+parser.add_argument('-d', '--data_set', type=str, default='cifar', help='Can be either cifar|imagenet|svhn')
 parser.add_argument('-t', '--save_interval', type=int, default=20, help='Every how many epochs to write checkpoint/samples?')
 parser.add_argument('-r', '--load_params', dest='load_params', action='store_true', help='Restore training from previous model checkpoint?')
 # model
@@ -70,6 +70,9 @@ if args.data_set == 'cifar':
 elif args.data_set == 'imagenet':
     import data.imagenet_data as imagenet_data
     DataLoader = imagenet_data.DataLoader
+elif args.data_set == 'svhn':
+    import data.svhn_data as svhn_data
+    DataLoader = svhn_data.DataLoader
 else:
     raise("unsupported dataset")
 train_data = DataLoader(args.data_dir, 'train', args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
