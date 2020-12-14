@@ -26,8 +26,6 @@ import os
 import glob
 import math
 
-from absl import app
-from absl import flags
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
 import numpy as np
@@ -70,9 +68,10 @@ def compute_auc_grad(preds_in, preds_ood, preds0_in, preds0_ood):
   auc_llr = compute_auc(llr_in, llr_ood, pos_label=0)
   return auc, auc_llr
 
-def print_and_write(f, context):
+def print_and_write(fname, context):
   print(context + '\n')
-  f.write(context + '\n')
+  with open(fname, 'w') as f:
+      f.write(context + '\n')
 
 def get_complexity(exp, data_dir, eval_mode_in, eval_mode_ood):
     if eval_mode_in == 'tr':
@@ -154,7 +153,7 @@ import data.svhn_data as svhn_data
 
 parser = argparse.ArgumentParser()
 # data I/O
-parser.add_argument('-i', '--data_dir', type=str, default='/local_home/tim/pxpp/data', help='Location for the dataset')
+parser.add_argument('--data_dir', type=str, default='/local_home/tim/pxpp/data', help='Location for the dataset')
 parser.add_argument('--ckpt_file', type=str, default='/local_home/tim/pxpp/data', help='path for file, e.g. /path/params_cifar.ckpt')
 parser.add_argument('--exp', type=str, default='cifar', help='cifar|svhn')
 parser.add_argument('--suffix', type=str, default='', help='suffix for results file')
@@ -165,7 +164,7 @@ parser.add_argument('-m', '--nr_logistic_mix', type=int, default=10, help='Numbe
 parser.add_argument('-z', '--resnet_nonlinearity', type=str, default='concat_elu', help='Which nonlinearity to use in the ResNet layers. One of "concat_elu", "elu", "relu" ')
 parser.add_argument('-c', '--class_conditional', dest='class_conditional', action='store_true', help='Condition generative model on labels?')
 parser.add_argument('-ed', '--energy_distance', dest='energy_distance', action='store_true', help='use energy distance in place of likelihood')
-parser.add_argument('-ed', '--deriv_constraint', dest='deriv_constraint', action='store_true', help='use derivative constraint (only for likelihood)')
+parser.add_argument('--deriv_constraint', dest='deriv_constraint', action='store_true', help='use derivative constraint (only for likelihood)')
 # optimization
 parser.add_argument('-l', '--learning_rate', type=float, default=0.001, help='Base learning rate')
 parser.add_argument('-e', '--lr_decay', type=float, default=0.999995, help='Learning rate decay, applied every step of the optimization')
@@ -184,27 +183,32 @@ args = parser.parse_args()
 rng = np.random.RandomState(args.seed)
 tf.set_random_seed(args.seed)
 
-def get_preds(sess, model, args, eval_mode_in, eval_mode_ood):
+def get_preds(model, args, eval_mode_in, eval_mode_ood):
     # get data
     if args.exp == 'cifar':
         TrainDataLoader = cifar10_data.DataLoader
         TestDataLoader = svhn_data.DataLoader
+        train_data_dir = '../data/'
+        test_data_dir = '../data/svhn'
     elif args.exp == 'svhn':
         TrainDataLoader = svhn_data.DataLoader
         TestDataLoader = cifar10_data.DataLoader
+        train_data_dir = '../data/svhn'
+        test_data_dir = '../data/'
     else:
         raise("unsupported dataset")
-    train_data = TrainDataLoader(args.data_dir, eval_mode_in, args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
-    test_data = TestDataLoader(args.data_dir, eval_mode_ood, args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional)
+    train_data = TrainDataLoader(train_data_dir, eval_mode_in, args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
+    test_data = TestDataLoader(test_data_dir, eval_mode_ood, args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional)
     obs_shape = train_data.get_observation_size()
 
     h_sample = [None] * args.nr_gpu
     hs = h_sample
+    h_init = None
 
     xs = [tf.placeholder(tf.float32, shape=(args.batch_size, ) + obs_shape) for i in range(args.nr_gpu)]
+    x_init = tf.placeholder(tf.float32, shape=(args.init_batch_size,) + obs_shape)
 
     def make_feed_dict(data, obs_shape, init=False):
-        x_init = tf.placeholder(tf.float32, shape=(args.init_batch_size,) + obs_shape)
         if type(data) is tuple:
             x,y = data
         else:
@@ -226,7 +230,12 @@ def get_preds(sess, model, args, eval_mode_in, eval_mode_ood):
     model_opt = { 'nr_resnet': args.nr_resnet, 'nr_filters': args.nr_filters, 'nr_logistic_mix': args.nr_logistic_mix, 'resnet_nonlinearity': args.resnet_nonlinearity, 'energy_distance': args.energy_distance }
     train_losses = []
     test_losses = []
-    for i in range(args.nr_gpu):
+    i = 0
+    init_pass = model(x_init, h_init, init=True, dropout_p=args.dropout_p, **model_opt)
+    initializer = tf.global_variables_initializer()
+    saver = tf.train.Saver()
+    with tf.Session() as sess:
+        saver.restore(sess, args.ckpt_file)
         with tf.device('/gpu:%d' % i):
             for d in test_data:
                 feed_dict = make_feed_dict(d, obs_shape)
@@ -242,22 +251,17 @@ def get_preds(sess, model, args, eval_mode_in, eval_mode_ood):
                 train_losses.append(l)
     return train_losses, test_losses
 
-def main(unused_argv):
+def main():
     # write results to file
     out_dir = os.path.join(args.exp + '_save_dir', 'results')
-    tf.compat.v1.gfile.MakeDirs(out_dir)
-    out_f = tf.compat.v1.gfile.Open(
-        os.path.join(out_dir, 'run%d.txt' % args.suffix), 'w')
+    from pathlib import Path
+    Path(out_dir).mkdir(exist_ok=True)
+    out_f = os.path.join(out_dir, 'run%s.txt' % args.suffix)
     # load model
     model = tf.make_template('model', model_spec)
     initializer = tf.global_variables_initializer()
-    saver = tf.train.Saver()
-    ckpt_file = args.ckpt_file
-    print('restoring parameters from', ckpt_file)
     # get preds
-    with tf.Session() as sess:
-        saver.restore(sess, ckpt_file)
-        preds_in, preds_ood = get_preds(sess, model, args, 'test', 'test')
+    preds_in, preds_ood = get_preds(model, args, 'test', 'test')
 
     preds0_in, preds0_ood = get_complexity(args.exp, args.data_dir, 'test', 'test')
     auc, auc_llr = compute_auc_llr(preds_in, preds_ood, preds0_in, preds0_ood)
@@ -278,4 +282,4 @@ def main(unused_argv):
 
 
 if __name__ == '__main__':
-  app.run(main)
+  main()
