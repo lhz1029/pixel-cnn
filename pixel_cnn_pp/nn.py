@@ -5,6 +5,7 @@ Various tensorflow utilities
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.framework.python.ops import add_arg_scope
+import tensorflow_probability as tfp
 
 def int_shape(x):
     return list(map(int, x.get_shape()))
@@ -85,6 +86,25 @@ def discretized_mix_logistic_loss(x,l,sum_all=True):
         return -tf.reduce_sum(log_sum_exp(log_probs))
     else:
         return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])
+
+
+def continuous_mix_logistic_loss(x,l,sum_all=True):
+    xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
+    ls = int_shape(l) # predicted distribution, e.g. (B,32,32,100)
+    nr_mix = int(ls[-1] / 10) # here and below: unpacking the params of the mixture of logistics
+    logit_probs = l[:,:,:,:nr_mix] # mixture probabilities of each logistic distribution (B, 32, 32, 10)
+    l = tf.reshape(l[:,:,:,nr_mix:], xs + [nr_mix*3]) # (B, 32, 32, 90) -> (B, 32, 32, 3, 30)
+    means = l[:,:,:,:,:nr_mix]  # (B, 32, 32, 3, 10)
+    log_scales = tf.maximum(l[:,:,:,:,nr_mix:2*nr_mix], -7.)  # (B, 32, 32, 3, 10)
+    coeffs = tf.nn.tanh(l[:,:,:,:,2*nr_mix:3*nr_mix])  # (B, 32, 32, 3, 10)
+    x = tf.reshape(x, xs + [1]) + tf.zeros(xs + [nr_mix]) # here and below: getting the means and adjusting them based on preceding sub-pixels (B,32,32,3,10)
+    m2 = tf.reshape(means[:,:,:,1,:] + coeffs[:, :, :, 0, :] * x[:, :, :, 0, :], [xs[0],xs[1],xs[2],1,nr_mix])  # (B,32,32,1,10)
+    m3 = tf.reshape(means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] + coeffs[:, :, :, 2, :] * x[:, :, :, 1, :], [xs[0],xs[1],xs[2],1,nr_mix])  # (B,32,32,1,10)
+    means = tf.concat([tf.reshape(means[:,:,:,0,:], [xs[0],xs[1],xs[2],1,nr_mix]), m2, m3],3)  # (B,32,32,3,10)
+    scales = tf.exp(log_scales)  # (B,32,32,3,10)
+    logistic = tfp.distributions.Logistic(loc=means, scale=scales)
+    logit_prob_shape = int_shape(logit_probs)
+    return tf.math.reduce_sum(logistic.prob(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
 
 def sample_from_discretized_mix_logistic(l,nr_mix):
     ls = int_shape(l)

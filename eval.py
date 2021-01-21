@@ -164,7 +164,7 @@ parser.add_argument('-m', '--nr_logistic_mix', type=int, default=10, help='Numbe
 parser.add_argument('-z', '--resnet_nonlinearity', type=str, default='concat_elu', help='Which nonlinearity to use in the ResNet layers. One of "concat_elu", "elu", "relu" ')
 parser.add_argument('-c', '--class_conditional', dest='class_conditional', action='store_true', help='Condition generative model on labels?')
 parser.add_argument('-ed', '--energy_distance', dest='energy_distance', action='store_true', help='use energy distance in place of likelihood')
-parser.add_argument('--deriv_constraint', dest='deriv_constraint', action='store_true', help='use derivative constraint (only for likelihood)')
+parser.add_argument('-cl', '--continuous_logistic', dest='continuous_logistic', action='store_true', help='use logistic instead of discretized and bounded logistic')
 # optimization
 parser.add_argument('-l', '--learning_rate', type=float, default=0.001, help='Base learning rate')
 parser.add_argument('-e', '--lr_decay', type=float, default=0.999995, help='Learning rate decay, applied every step of the optimization')
@@ -182,6 +182,11 @@ args = parser.parse_args()
 
 rng = np.random.RandomState(args.seed)
 tf.set_random_seed(args.seed)
+
+if args.continuous_logistic:
+    loss_fun = nn.continuous_mix_logistic_loss
+else:
+    loss_fun = nn.discretized_mix_logistic_loss
 
 def get_preds(model, args, eval_mode_in, eval_mode_ood):
     # get data
@@ -240,13 +245,11 @@ def get_preds(model, args, eval_mode_in, eval_mode_ood):
             for d in test_data:
                 feed_dict = make_feed_dict(d, obs_shape)
                 out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                loss_fun = nn.discretized_mix_logistic_loss
                 l = sess.run(loss_fun(xs[i], out), feed_dict)
                 test_losses.append(l)
             for d in train_data:
                 feed_dict = make_feed_dict(d, obs_shape)
                 out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                loss_fun = nn.discretized_mix_logistic_loss
                 l = sess.run(loss_fun(xs[i], out), feed_dict)
                 train_losses.append(l)
     return train_losses, test_losses
