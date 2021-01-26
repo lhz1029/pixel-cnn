@@ -44,26 +44,26 @@ def energy_distance(x, x_sample):
 
     return 2.*l1 - l2
 
-def discretized_mix_logistic_loss(x,l,sum_all=True):
+def discretized_mix_logistic_loss(x,l,sum_all='batch'):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
     ls = int_shape(l) # predicted distribution, e.g. (B,32,32,100)
     nr_mix = int(ls[-1] / 10) # here and below: unpacking the params of the mixture of logistics
-    logit_probs = l[:,:,:,:nr_mix]
+    logit_probs = l[:,:,:,:nr_mix]  # (B,32,32,10)
     l = tf.reshape(l[:,:,:,nr_mix:], xs + [nr_mix*3])
     means = l[:,:,:,:,:nr_mix]
-    log_scales = tf.maximum(l[:,:,:,:,nr_mix:2*nr_mix], -7.)
-    coeffs = tf.nn.tanh(l[:,:,:,:,2*nr_mix:3*nr_mix])
-    x = tf.reshape(x, xs + [1]) + tf.zeros(xs + [nr_mix]) # here and below: getting the means and adjusting them based on preceding sub-pixels
+    log_scales = tf.maximum(l[:,:,:,:,nr_mix:2*nr_mix], -7.)  # (B,32,32,3,10)
+    coeffs = tf.nn.tanh(l[:,:,:,:,2*nr_mix:3*nr_mix])  # (B,32,32,3,10)
+    x = tf.reshape(x, xs + [1]) + tf.zeros(xs + [nr_mix]) # here and below: getting the means and adjusting them based on preceding sub-pixels  (B,32,32,3,10)
     m2 = tf.reshape(means[:,:,:,1,:] + coeffs[:, :, :, 0, :] * x[:, :, :, 0, :], [xs[0],xs[1],xs[2],1,nr_mix])
     m3 = tf.reshape(means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] + coeffs[:, :, :, 2, :] * x[:, :, :, 1, :], [xs[0],xs[1],xs[2],1,nr_mix])
-    means = tf.concat([tf.reshape(means[:,:,:,0,:], [xs[0],xs[1],xs[2],1,nr_mix]), m2, m3],3)
-    centered_x = x - means
-    inv_stdv = tf.exp(-log_scales)
-    plus_in = inv_stdv * (centered_x + 1./255.)
-    cdf_plus = tf.nn.sigmoid(plus_in)
-    min_in = inv_stdv * (centered_x - 1./255.)
-    cdf_min = tf.nn.sigmoid(min_in)
+    means = tf.concat([tf.reshape(means[:,:,:,0,:], [xs[0],xs[1],xs[2],1,nr_mix]), m2, m3],3) # (B,32,32,3,10)
+    centered_x = x - means  # (B,32,32,3,10)
+    inv_stdv = tf.exp(-log_scales)  # (B,32,32,3,10)
+    plus_in = inv_stdv * (centered_x + 1./255.)  # (B,32,32,3,10)
+    cdf_plus = tf.nn.sigmoid(plus_in)  # (B,32,32,3,10)
+    min_in = inv_stdv * (centered_x - 1./255.)  # (B,32,32,3,10)
+    cdf_min = tf.nn.sigmoid(min_in)  # (B,32,32,3,10)
     log_cdf_plus = plus_in - tf.nn.softplus(plus_in) # log probability for edge case of 0 (before scaling)
     log_one_minus_cdf_min = -tf.nn.softplus(min_in) # log probability for edge case of 255 (before scaling)
     cdf_delta = cdf_plus - cdf_min # probability for all other cases
@@ -81,11 +81,48 @@ def discretized_mix_logistic_loss(x,l,sum_all=True):
     # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
     log_probs = tf.where(x < -0.999, log_cdf_plus, tf.where(x > 0.999, log_one_minus_cdf_min, tf.where(cdf_delta > 1e-5, tf.log(tf.maximum(cdf_delta, 1e-12)), log_pdf_mid - np.log(127.5))))
 
-    log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)
-    if sum_all:
-        return -tf.reduce_sum(log_sum_exp(log_probs))
-    else:
-        return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])
+    if sum_all == 'batch':
+        log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
+        return -tf.reduce_sum(log_sum_exp(log_probs))  # (1)
+    elif sum_all == 'image':
+        log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
+        return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])  # (B)
+    elif sum_all == 'pixel':
+        log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
+        return -log_sum_exp(log_probs)  # (B,32,32)
+    elif sum_all == 'residual':
+        p_mi_given_c = tf.exp(log_mixture_coef)  # P(MixtureIndicator_{i,j} | Context_{i,j})
+        ar_residual_r = tf.reduce_sum(centered_x[:,:,:,0] * p_mi_given_c, axis=-1, keepdims=True)
+        p_mi_given_cr = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0], axis=-1)
+        ar_residual_g = tf.reduce_sum(centered_x[:,:,:,1] * p_mi_given_cr, axis=-1, keepdims=True)
+        p_mi_given_crg = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0] + log_probs_given_c_mi[:,:,:,1], axis=-1)
+        ar_residual_b = tf.reduce_sum(centered_x[:,:,:,2] * p_mi_given_crg, axis=-1, keepdims=True)
+        ar_residual = tf.concat([ar_residual_r, ar_residual_g, ar_residual_b], axis=-1)
+        return ar_residual
+    elif sum_all == 'all':
+        log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
+        log_probs = -tf.reduce_sum(log_sum_exp(log_probs),[1,2])  # (B)
+
+        p_mi_given_c = tf.exp(log_mixture_coef)  # P(MixtureIndicator_{i,j} | Context_{i,j})
+        ar_residual_r = tf.reduce_sum(centered_x[:,:,:,0] * p_mi_given_c, axis=-1, keepdims=True)
+        p_mi_given_cr = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0], axis=-1)
+        ar_residual_g = tf.reduce_sum(centered_x[:,:,:,1] * p_mi_given_cr, axis=-1, keepdims=True)
+        p_mi_given_crg = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0] + log_probs_given_c_mi[:,:,:,1], axis=-1)
+        ar_residual_b = tf.reduce_sum(centered_x[:,:,:,2] * p_mi_given_crg, axis=-1, keepdims=True)
+        ar_residual = tf.concat([ar_residual_r, ar_residual_g, ar_residual_b], axis=-1)  # (B,32,32)
+
+        cdf_mins = logistic.cdf(tf.math.maximum(x - 1/127.5, -1))
+        cdf_maxes = logistic.cdf(x)
+        cdf_range = tfp.distributions.Uniform(cdf_mins, cdf_maxes)
+        logit_probs = tf.exp(log_prob_from_logits(logit_probs))
+        cdf_transform = tf.math.reduce_sum(cdf_range.sample() * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
+
+        return log_probs, ar_residual, cdf_transform
+        # # including RGB as separate elements
+        # logit_prob_shape = int_shape(logit_probs)
+        # logit_probs = tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:])  # (B,32,32,1,10)
+        # log_probs = log_probs + log_prob_from_logits(logit_probs)  # (B,32,32,3,10)
+        # return -tf.reduce_sum(log_sum_exp(log_probs), [-1])  # (B,32,32,3)
 
 def get_params_from_l(x, l, sum_all=True):
     xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
@@ -140,14 +177,24 @@ def cdf_transform_discretized(x,l,sum_all=True):
     means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
     logistic = tfp.distributions.Logistic(loc=means, scale=scales)
     logit_prob_shape = int_shape(logit_probs)
-    cdf_mins = logistic.cdf(tf.math.maximum(x - 1, 0))
+    # x = tf.Print(x, [tf.math.reduce_min(x)])
+    # x = tf.Print(x, [tf.math.reduce_max(x)])
+    cdf_mins = logistic.cdf(tf.math.maximum(x - 1/127.5, -1))
+    # cdf_mins = tf.Print(cdf_mins, [tf.math.reduce_min(cdf_mins)])
     cdf_maxes = logistic.cdf(x)
+    # cdf_maxes = tf.Print(cdf_maxes, [tf.math.reduce_min(cdf_maxes)])
+    cdf_maxes = tf.Print(cdf_maxes, [tf.math.reduce_min(cdf_mins), tf.math.reduce_min(cdf_maxes), tf.math.reduce_min(cdf_maxes - cdf_mins)])
     cdf_range = tfp.distributions.Uniform(cdf_mins, cdf_maxes)
-    return tf.math.reduce_sum(cdf_range.sample() * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
+    uniforms = cdf_range.sample()
+    uniforms = tf.Print(uniforms, [tf.math.reduce_min(uniforms), tf.math.reduce_max(uniforms)])
+    logit_probs = tf.exp(log_prob_from_logits(logit_probs))
+    logit_probs = tf.Print(logit_probs, [tf.math.reduce_min(logit_probs)])
+    return tf.math.reduce_sum(uniforms * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
 
 def cdf_transform_continuous(x,l,sum_all=True):
     means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
     logistic = tfp.distributions.Logistic(loc=means, scale=scales)
+    logit_probs = log_prob_from_logits(logit_probs)
     logit_prob_shape = int_shape(logit_probs)
     return tf.math.reduce_sum(logistic.cdf(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
 

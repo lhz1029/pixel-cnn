@@ -23,10 +23,12 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import sys
 import glob
 import math
 import argparse
 import cv2
+from functools import partial
 
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
@@ -47,14 +49,10 @@ def get_available_gpus():
 print(get_available_gpus)
 
 def compute_auc(neg, pos, pos_label=1):
-    print('neg', neg)
-    print('pos', pos)
     ys = np.concatenate((np.zeros(len(neg)), np.ones(len(pos))), axis=0)
     neg = np.array(neg)[np.logical_not(np.isnan(neg))]
     pos = np.array(pos)[np.logical_not(np.isnan(pos))]
     scores = np.concatenate((neg, pos), axis=0)
-    print('ys', ys)
-    print('scores', scores)
     auc = metrics.roc_auc_score(ys, scores)
     if pos_label == 1:
         return auc
@@ -197,12 +195,16 @@ def get_preds(model, args, dataset, eval_mode, func):
 
     model_opt = { 'nr_resnet': args.nr_resnet, 'nr_filters': args.nr_filters, 'nr_logistic_mix': args.nr_logistic_mix, 'resnet_nonlinearity': args.resnet_nonlinearity, 'energy_distance': args.energy_distance }
     train_losses = []
+    # all_log_probs = []
+    # all_ar_resids = []
+    # all_cdf_transform = []
     i = 0
     init_pass = model(x_init, h_init, init=True, dropout_p=args.dropout_p, **model_opt)
     # out = model(next_element, h_init, init=True, dropout_p=0, **model_opt)
     initializer = tf.global_variables_initializer()
     saver = tf.train.Saver()
-    with tf.Session() as sess:
+    config = tf.ConfigProto(allow_soft_placement = True)
+    with tf.Session(config=config) as sess:
         saver.restore(sess, args.ckpt_file)
         with tf.device('/gpu:%d' % i):
             # l = sess.run(func(next_element, out))
@@ -212,17 +214,27 @@ def get_preds(model, args, dataset, eval_mode, func):
                 x = np.cast[np.float32]((x - 127.5) / 127.5)
                 feed_dict = {xs[i]: x}
                 out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                l = sess.run(func(xs[i], out, sum_all=False), feed_dict)
+                # log_probs, ar_resids, cdf_transform = sess.run(func(xs[i], out, sum_all='pixel'), feed_dict)
+                # all_log_probs.extend(log_probs)
+                # all_ar_resids.extend(ar_resids)
+                # all_cdf_transform.extend(cdf_transform)
+                l = sess.run(func(xs[i], out, sum_all='image'), feed_dict)
                 train_losses.extend(l)
     return train_losses
+    # return all_log_probs, all_ar_resids, all_cdf_transform
 
 def get_entropy(log_probs):
     return np.mean(log_probs)
 
 def distance_from_unif(samples, test='ks'):
-    n = len(samples)
-    sorted_samples = sorted(samples)
-    assert all([0 <= s <= 1 for s in sorted_samples])
+    sorted_samples = np.sort(samples, axis=1)
+    assert (np.greater_equal(sorted_samples, 0)).all(), sorted_samples
+    assert (np.less_equal(sorted_samples, 1)).all(), sorted_samples
+    ts_test = partial(ts, test=test)
+    return np.apply_along_axis(ts_test, 0, sorted_samples)
+
+def ts(sorted_samples, test):
+    n = len(sorted_samples)
     if test == 'ks':
         # should not include 0 but include 1
         unif_cdf = list(np.arange(0, 1, 1/n))[1:] + [1.0]
@@ -235,8 +247,8 @@ def distance_from_unif(samples, test='ks'):
     elif test == 'ad':
         ts = 0
         for i in range(1, n + 1):
-            ts += (2*i - 1) * math.log(sorted_samples[i-1])
-            ts += (2*n + 1 - 2*i) * math.log(1 - sorted_samples[i-1])
+            ts += (2*i - 1) * math.log(np.maximum(sorted_samples[i-1], [1e-16]))
+            ts += (2*n + 1 - 2*i) * math.log(np.maximum(1 - sorted_samples[i-1], [1e-16]))
         ts /= n
         ts -= n
         return ts
@@ -315,46 +327,50 @@ def main():
     initializer = tf.global_variables_initializer()
     tf.logging.log(tf.logging.INFO, 'initialized model')
     # LR
-    log_probs_in = get_log_probs(model, args, args.in_data, 'test')
-    np.save('intermediate/' + name + '_log_probs_in.npy', log_probs_in)
-    log_probs_ood = get_log_probs(model, args, args.ood_data, 'test')
-    np.save('intermediate/' + name + '_log_probs_ood.npy', log_probs_ood)
-    complexity_in = get_complexity(args, args.in_data, 'test')
-    complexity_ood = get_complexity(args, args.ood_data, 'test')
-    print(log_probs_in, log_probs_ood)
-    print(len(log_probs_in),len(log_probs_ood),len(complexity_in), len(complexity_ood))
-    auc, auc_llr = compute_auc_llr(log_probs_in, log_probs_ood, complexity_in, complexity_ood)
-    tf.logging.log(tf.logging.INFO, f'LL: {auc}')
-    tf.logging.log(tf.logging.INFO, f'LR: {auc_llr}')
-    with open(f'results/{name}.txt', 'a') as f:
-        f.write(f'LL: {auc}\n')
-        f.write(f'LR: {auc_llr}\n')
-    # TT
-    log_probs_train = get_log_probs(model, args, args.in_data, 'train')
-    np.save('intermediate/' + name + '_log_probs_train.npy', log_probs_train)
-    train_entropy = get_entropy(log_probs_train)
-    typical_ts_in = list(map(abs, log_probs_in - train_entropy))
-    typical_ts_ood = list(map(abs, log_probs_ood - train_entropy))
-    print('before', typical_ts_in, typical_ts_ood)
-    # want higher to be better
-    print('-1', np.array(typical_ts_in) * -1, np.array(typical_ts_ood) * -1)
-    auc_tt = compute_auc(np.array(typical_ts_in) * -1, np.array(typical_ts_ood) * -1)
-    tf.logging.log(tf.logging.INFO, f'TT: {auc_tt}')
-    with open(f'results/{name}.txt', 'a') as f:
-        f.write(f'TT: {auc_tt}')
-    # WN
-    wn_in, wn_ood = time_series_test(np.array(log_probs_train), np.array(log_probs_in), np.array(log_probs_ood), 'bp')
-    print(len(wn_in), len(wn_ood))
-    auc_wn = compute_auc(wn_in * -1, wn_ood * -1)
-    print(f'WN: {auc_wn}')
-    with open(f'results/{name}.txt', 'a') as f:
-        f.write(f'UNIF: {auc_wn}')
+    # log_probs_pixel_in = get_log_probs(model, args, args.in_data, 'test')  # (N,32,32,3)
+    # log_probs_in = np.mean(log_probs_pixel_in, axis=(1, 2, 3))
+    # np.save('intermediate/' + name + '_log_probs_in.npy', log_probs_in)
+    # log_probs_pixel_ood = get_log_probs(model, args, args.ood_data, 'test')
+    # log_probs_ood = np.mean(log_probs_pixel_ood, axis=(1, 2, 3))
+    # np.save('intermediate/' + name + '_log_probs_ood.npy', log_probs_ood)
+    # complexity_in = get_complexity(args, args.in_data, 'test')
+    # complexity_ood = get_complexity(args, args.ood_data, 'test')
+    # print(log_probs_in, log_probs_ood)
+    # print(len(log_probs_in),len(log_probs_ood),len(complexity_in), len(complexity_ood))
+    # auc, auc_llr = compute_auc_llr(log_probs_in, log_probs_ood, complexity_in, complexity_ood)
+    # tf.logging.log(tf.logging.INFO, f'LL: {auc}')
+    # tf.logging.log(tf.logging.INFO, f'LR: {auc_llr}')
+    # with open(f'results/{name}.txt', 'a') as f:
+    #     f.write(f'LL: {auc}\n')
+    #     f.write(f'LR: {auc_llr}\n')
+    # # TT
+    # log_probs_pixel_train = get_log_probs(model, args, args.in_data, 'train')
+    # log_probs_train = np.mean(log_probs_pixel_train, axis=(1, 2, 3))
+    # np.save('intermediate/' + name + '_log_probs_train.npy', log_probs_train)
+    # train_entropy = get_entropy(log_probs_train)
+    # typical_ts_in = list(map(abs, log_probs_in - train_entropy))
+    # typical_ts_ood = list(map(abs, log_probs_ood - train_entropy))
+    # print('before', typical_ts_in, typical_ts_ood)
+    # # want higher to be better
+    # print('-1', np.array(typical_ts_in) * -1, np.array(typical_ts_ood) * -1)
+    # auc_tt = compute_auc(np.array(typical_ts_in) * -1, np.array(typical_ts_ood) * -1)
+    # tf.logging.log(tf.logging.INFO, f'TT: {auc_tt}')
+    # with open(f'results/{name}.txt', 'a') as f:
+    #     f.write(f'TT: {auc_tt}')
+    # # WN
+    # wn_in, wn_ood = time_series_test(np.array(log_probs_pixel_train), np.array(log_probs_pixel_in), np.array(log_probs_pixel_ood), 'bp')
+    # print(len(wn_in), len(wn_ood))
+    # auc_wn = compute_auc(wn_in * -1, wn_ood * -1)
+    # print(f'WN: {auc_wn}')
+    # with open(f'results/{name}.txt', 'a') as f:
+    #     f.write(f'UNIF: {auc_wn}')
     # UNIF
-    unifs_in = get_cdf_transform(model, args, args.in_data, 'test')
+    unifs_in = get_cdf_transform(model, args, args.in_data, 'test')  # (B,32,32,3)
     unifs_ood = get_cdf_transform(model, args, args.ood_data, 'test')
-    for metric in ['ks', 'cvm', 'ad']:
-        gof_ts_in = distance_from_unif(unifs_in, metric)
-        gof_ts_ood = distance_from_unif(unifs_ood, metric)
+    # for metric in ['ks', 'cvm', 'ad']:
+    for metric in ['ad']:
+        gof_ts_in = distance_from_unif(unifs_in, metric).flatten()
+        gof_ts_ood = distance_from_unif(unifs_ood, metric).flatten()
         print(len(gof_ts_in), len(gof_ts_ood))
         # want higher to be better
         auc_unif = compute_auc(gof_ts_in * -1, gof_ts_ood * -1)
