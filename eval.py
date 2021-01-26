@@ -25,6 +25,8 @@ from __future__ import print_function
 import os
 import glob
 import math
+import argparse
+import cv2
 
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
@@ -33,6 +35,9 @@ import seaborn as sns
 import tensorflow.compat.v1 as tf
 from sklearn import metrics
 from pixel_cnn_pp import nn
+from pixel_cnn_pp.model import model_spec
+import data.cifar10_data as cifar10_data
+import data.svhn_data as svhn_data
 
 
 def compute_auc(neg, pos, pos_label=1):
@@ -69,94 +74,27 @@ def compute_auc_grad(preds_in, preds_ood, preds0_in, preds0_ood):
   return auc, auc_llr
 
 def print_and_write(fname, context):
-  print(context + '\n')
-  with open(fname, 'w') as f:
-      f.write(context + '\n')
+    print(context + '\n')
+    with open(fname, 'w') as f:
+        f.write(context + '\n')
 
-def get_complexity(exp, data_dir, eval_mode_in, eval_mode_ood):
-    if eval_mode_in == 'tr':
-        eval_mode_in = 'train'
-    if eval_mode_ood == 'tr':
-        eval_mode_ood = 'train'
-    if exp == 'fashion':
-        in_data_name = 'fashion_mnist'
-        ood_data_name = 'mnist'
-    elif exp == 'mnist':
-        in_data_name = 'mnist'
-        ood_data_name = 'fashion_mnist'
-    elif exp == 'mnist':
-        in_data_name = 'mnist'
-        ood_data_name = 'fashion_mnist'
-    elif exp == 'mnist':
-        in_data_name = 'mnist'
-        ood_data_name = 'fashion_mnist'
-    else:
-        raise ValueError("exp complexity not supported: ", exp)
-    data_in_path = os.path.join(data_dir, in_data_name + '_' + eval_mode_in, '*.png')
-    data_ood_path = os.path.join(data_dir, ood_data_name + '_' + eval_mode_ood, '*.png')
-    in_fnames = sorted(glob.glob(data_in_path))
-    ood_fnames = sorted(glob.glob(data_ood_path))
-    preds0_in_bits = [os.stat(fname).st_size * 8 for fname in in_fnames]
-    preds0_ood_bits = [os.stat(fname).st_size * 8 for fname in ood_fnames]
-    preds0_in = {}
-    preds0_ood = {}
-    preds0_in['labels'] = [math.log(2 ** bits) for bits in preds0_in_bits]
-    preds0_ood['labels'] = [math.log(2 ** bits) for bits in preds0_ood_bits]
-    preds0_in['log_probs'] = [math.log(2 ** bits) for bits in preds0_in_bits]
-    preds0_ood['log_probs'] = [math.log(2 ** bits) for bits in preds0_ood_bits]
-    return preds0_in, preds0_ood
+def get_complexity(args, dataset, eval_mode):
+    """ Adapted from https://github.com/boschresearch/hierarchical_anomaly_detection/blob/master/SerraReplicationCode/ReferenceGlowVsDirectPng.py """
+    data = get_data(args, dataset, eval_mode)
+    all_bpds = []
+    for a_x in data:
+        # Use highest compression level (9)
+        img_encoded = cv2.imencode('.png', a_x, [int(cv2.IMWRITE_PNG_COMPRESSION),9])[1]
+        assert img_encoded.shape[1] == 1
+        all_bpds.append((len(img_encoded) * 8)/np.prod(a_x.shape))
+    return all_bpds
 
-# def plot_heatmap(n, data, plt_file, colorbar=True):
-#   """Plot heatmaps (Figure 3 in the paper)."""
-#   sns.set_style('whitegrid')
-#   sns.set(style='ticks', rc={'lines.linewidth': 4})
-#   cmap_reversed = ListedColormap(sns.color_palette('Greys_r', 6).as_hex())
-#   fig, axes = plt.subplots(nrows=n, ncols=n, figsize=(2 * n - 2, 2 * n - 2))
-#   i = 0
-#   for ax in axes.flat:
-#     im = ax.imshow(data[i], vmin=0, vmax=6, cmap=cmap_reversed)
-#     ax.get_xaxis().set_visible(False)
-#     ax.get_yaxis().set_visible(False)
-#     i += 1
-#   fig.subplots_adjust(right=0.9)
-#   if colorbar:
-#     cbar_ax = fig.add_axes([0.95, 0.15, 0.05, 0.7])
-#     fig.colorbar(im, cax=cbar_ax)
-#     cbar_ax.tick_params(labelsize=20)
-
-#   with tf.gfile.Open(plt_file, 'wb') as sp:
-#     plt.savefig(sp, format='pdf', bbox_inches='tight')
-
-# def calculate_zeros(exp, data_dir):
-#   if exp == 'fashion':
-#     test_in = os.path.join(data_dir, 'fashion_mnist_test.npy')
-#     test_ood = os.path.join(data_dir, 'mnist_test.npy')
-#   elif exp == 'mnist':
-#     test_in = os.path.join(data_dir, 'mnist_test.npy')
-#     test_ood = os.path.join(data_dir, 'fashion_mnist_test.npy')
-#   else:
-#     raise ValueError("exp not supported: ", exp)
-#   img_in = np.load(test_in)
-#   img_ood = np.load(test_ood)
-#   img_in = img_in.reshape((img_in.shape[0], -1))
-#   img_ood = img_ood.reshape((img_ood.shape[0], -1))
-#   # zeros_in = (img_in == 0).sum(axis=1) / img_in.shape[1]
-#   # zeros_ood = (img_ood == 0).sum(axis=1) / img_ood.shape[1]
-#   zeros_in = np.mean(img_in, axis=1)
-#   zeros_ood = np.mean(img_in, axis=1)
-#   return zeros_in, zeros_ood
-
-import argparse
-from pixel_cnn_pp.model import model_spec
-import data.cifar10_data as cifar10_data
-import data.svhn_data as svhn_data
 
 parser = argparse.ArgumentParser()
 # data I/O
-parser.add_argument('--data_dir', type=str, default='/local_home/tim/pxpp/data', help='Location for the dataset')
 parser.add_argument('--ckpt_file', type=str, default='/local_home/tim/pxpp/data', help='path for file, e.g. /path/params_cifar.ckpt')
-parser.add_argument('--exp', type=str, default='cifar', help='cifar|svhn')
-parser.add_argument('--suffix', type=str, default='', help='suffix for results file')
+parser.add_argument('--in_data', type=str, default='cifar', help='cifar|cifar_samples')
+parser.add_argument('--ood_data', type=str, default='svhn', help='svhn|celeba|cifar100')
 # model
 parser.add_argument('-q', '--nr_resnet', type=int, default=5, help='Number of residual blocks per stage of the model')
 parser.add_argument('-n', '--nr_filters', type=int, default=160, help='Number of filters to use across the model. Higher = larger model.')
@@ -166,16 +104,7 @@ parser.add_argument('-c', '--class_conditional', dest='class_conditional', actio
 parser.add_argument('-ed', '--energy_distance', dest='energy_distance', action='store_true', help='use energy distance in place of likelihood')
 parser.add_argument('-cl', '--continuous_logistic', dest='continuous_logistic', action='store_true', help='use logistic instead of discretized and bounded logistic')
 # optimization
-parser.add_argument('-l', '--learning_rate', type=float, default=0.001, help='Base learning rate')
-parser.add_argument('-e', '--lr_decay', type=float, default=0.999995, help='Learning rate decay, applied every step of the optimization')
-parser.add_argument('-b', '--batch_size', type=int, default=16, help='Batch size during training per GPU')
-parser.add_argument('-u', '--init_batch_size', type=int, default=16, help='How much data to use for data-dependent initialization.')
-parser.add_argument('-p', '--dropout_p', type=float, default=0.5, help='Dropout strength (i.e. 1 - keep_prob). 0 = No dropout, higher = more dropout.')
-parser.add_argument('-x', '--max_epochs', type=int, default=5000, help='How many epochs to run in total?')
 parser.add_argument('-g', '--nr_gpu', type=int, default=8, help='How many GPUs to distribute the training across?')
-# evaluation
-parser.add_argument('--polyak_decay', type=float, default=0.9995, help='Exponential decay rate of the sum of previous model iterates during Polyak averaging')
-parser.add_argument('-ns', '--num_samples', type=int, default=1, help='How many batches of samples to output.')
 # reproducibility
 parser.add_argument('-s', '--seed', type=int, default=1, help='Random seed to use')
 args = parser.parse_args()
@@ -184,27 +113,40 @@ rng = np.random.RandomState(args.seed)
 tf.set_random_seed(args.seed)
 
 if args.continuous_logistic:
-    loss_fun = nn.continuous_mix_logistic_loss
+    log_prob_func = nn.continuous_mix_logistic_loss
+    cdf_func = nn.cdf_transform_continuous
 else:
-    loss_fun = nn.discretized_mix_logistic_loss
+    log_prob_func = nn.discretized_mix_logistic_loss
+    cdf_func = nn.cdf_transform_discretized
 
-def get_preds(model, args, eval_mode_in, eval_mode_ood):
-    # get data
-    if args.exp == 'cifar':
-        TrainDataLoader = cifar10_data.DataLoader
-        TestDataLoader = svhn_data.DataLoader
-        train_data_dir = '../data/'
-        test_data_dir = '../data/svhn'
-    elif args.exp == 'svhn':
-        TrainDataLoader = svhn_data.DataLoader
-        TestDataLoader = cifar10_data.DataLoader
-        train_data_dir = '../data/svhn'
-        test_data_dir = '../data/'
+
+def get_log_probs(model, args, dataset, eval_mode):
+    return get_preds(model, args, dataset, eval_mode, log_prob_func)
+
+def get_cdf_transform(model, args, dataset, eval_mode):
+    return get_preds(model, args, dataset, eval_mode, cdf_func)
+
+def get_data(args, dataset, eval_mode):
+    if dataset == 'cifar':
+        DataLoader = cifar10_data.DataLoader
+        data_dir = '../data/'
+    elif dataset == 'svhn':
+        DataLoader = svhn_data.DataLoader
+        data_dir = '../data/svhn'
+    elif dataset == 'cifar100':
+        raise NotImplemented("TODO")
+    elif dataset == 'celeba':
+        raise NotImplemented("TODO")
+    elif dataset == 'cifar_samples':
+        raise NotImplemented("TODO")
     else:
         raise("unsupported dataset")
-    train_data = TrainDataLoader(train_data_dir, eval_mode_in, args.batch_size * args.nr_gpu, rng=rng, shuffle=True, return_labels=args.class_conditional)
-    test_data = TestDataLoader(test_data_dir, eval_mode_ood, args.batch_size * args.nr_gpu, shuffle=False, return_labels=args.class_conditional)
-    obs_shape = train_data.get_observation_size()
+    data = DataLoader(data_dir, eval_mode, args.batch_size * args.nr_gpu, rng=rng, shuffle=False, return_labels=args.class_conditional)
+    return data
+
+def get_preds(model, args, dataset, eval_mode, func):
+    data = get_data(args, dataset, eval_mode)
+    obs_shape = data.get_observation_size()
 
     h_sample = [None] * args.nr_gpu
     hs = h_sample
@@ -234,7 +176,6 @@ def get_preds(model, args, eval_mode_in, eval_mode_ood):
 
     model_opt = { 'nr_resnet': args.nr_resnet, 'nr_filters': args.nr_filters, 'nr_logistic_mix': args.nr_logistic_mix, 'resnet_nonlinearity': args.resnet_nonlinearity, 'energy_distance': args.energy_distance }
     train_losses = []
-    test_losses = []
     i = 0
     init_pass = model(x_init, h_init, init=True, dropout_p=args.dropout_p, **model_opt)
     initializer = tf.global_variables_initializer()
@@ -242,46 +183,74 @@ def get_preds(model, args, eval_mode_in, eval_mode_ood):
     with tf.Session() as sess:
         saver.restore(sess, args.ckpt_file)
         with tf.device('/gpu:%d' % i):
-            for d in test_data:
+            for d in data:
                 feed_dict = make_feed_dict(d, obs_shape)
                 out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                l = sess.run(loss_fun(xs[i], out), feed_dict)
-                test_losses.append(l)
-            for d in train_data:
-                feed_dict = make_feed_dict(d, obs_shape)
-                out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                l = sess.run(loss_fun(xs[i], out), feed_dict)
+                l = sess.run(func(xs[i], out), feed_dict)
                 train_losses.append(l)
-    return train_losses, test_losses
+    return train_losses
+
+def get_entropy(log_probs):
+    return tf.math.reduce_mean(log_probs)
+
+def distance_from_unif(samples, test='ks'):
+    n = len(samples)
+    sorted_samples = sorted(samples)
+    assert all([0 <= s <= 1 for s in sorted_samples])
+    if test == 'ks':
+        # should not include 0 but include 1
+        unif_cdf = list(np.arange(0, 1, 1/n))[1:] + [1.0]
+        return max(abs(sorted_samples - unif_cdf))
+    elif test == 'cvm':
+        ts = 1/(12 * n)
+        for i in range(1, n + 1):
+            ts += (sorted_samples[i-1] - (2*i - 1)/n)**2
+        return ts
+    elif test == 'ad':
+        ts = 0
+        for i in range(1, n + 1):
+            ts += (2*i - 1) * math.log(sorted_samples[i-1])
+            ts += (2*n + 1 - 2*i) * math.log(1 - sorted_samples[i-1])
+        ts /= n
+        ts -= n
+        return ts
 
 def main():
-    # write results to file
-    out_dir = os.path.join(args.exp + '_save_dir', 'results')
-    from pathlib import Path
-    Path(out_dir).mkdir(exist_ok=True)
-    out_f = os.path.join(out_dir, 'run%s.txt' % args.suffix)
+    # # write results to file
+    # out_dir = os.path.join(args.exp + '_save_dir', 'results')
+    # from pathlib import Path
+    # Path(out_dir).mkdir(exist_ok=True)
+    # out_f = os.path.join(out_dir, 'run%s.txt' % args.suffix)
     # load model
     model = tf.make_template('model', model_spec)
     initializer = tf.global_variables_initializer()
-    # get preds
-    preds_in, preds_ood = get_preds(model, args, 'test', 'test')
+    # LR
+    log_probs_in = get_log_probs(model, args, args.in_data, 'test')
+    log_probs_ood = get_log_probs(model, args, args.ood_data, 'test')
+    complexity_in = get_complexity(args, args.in_data, 'test')
+    complexity_ood = get_complexity(args, args.ood_data, 'test')
+    auc, auc_llr = compute_auc_llr(log_probs_in, log_probs_ood, complexity_in, complexity_ood)
+    print(f'LL: {auc}')
+    print(f'LR: {auc_llr}')
+    # TT
+    train_log_probs = get_log_probs(model, args, args.in_data, 'train')
+    train_entropy = get_entropy(train_log_probs)  # TODO
+    typical_ts_in = list(map(abs, log_probs_in - train_entropy))
+    typical_ts_ood = list(map(abs, log_probs_ood - train_entropy))
+    # want higher to be better
+    auc_tt = compute_auc(typical_ts_in * -1, typical_ts_ood * -1)
+    print(f'TT: {auc_tt}')
+    # WN
+    # TODO https://github.com/thu-ml/ood-dgm/blob/master/pixelcnn/ardgm_tests.ipynb
 
-    preds0_in, preds0_ood = get_complexity(args.exp, args.data_dir, 'test', 'test')
-    auc, auc_llr = compute_auc_llr(preds_in, preds_ood, preds0_in, preds0_ood)
-    zeros_in = preds0_in
-    zeros_ood = preds0_ood
-    # plot
-    plt.scatter(zeros_in, preds_in, color='blue', alpha=.2)
-    plt.scatter(zeros_ood, preds_ood, color='red', alpha=.2)
-    plt.title(args.exp + ' likelihood')
-    plt.savefig(args.exp + ' likelihood' + '.pdf', bbox_inches='tight')
-    plt.clf()
-    plt.scatter(zeros_in, preds_in, color='blue', alpha=.2)
-    plt.scatter(zeros_ood, preds_ood, color='red', alpha=.2)
-    plt.title(args.exp + ' likelihood')
-    plt.savefig(args.exp + ' likelihood' + '.pdf', bbox_inches='tight')
-    plt.clf()
-    print_and_write(out_f, 'final test, auc={}, auc_llr={}'.format(auc, auc_llr))
+    # UNIF
+    unifs_in = get_cdf_transform(model, args, args.in_data, 'test')
+    unifs_ood = get_cdf_transform(model, args, args.ood_data, 'test')
+    gof_ts_in = distance_from_unif(unifs_in, 'ks')
+    gof_ts_ood = distance_from_unif(unifs_ood, 'ks')
+    # want higher to be better
+    auc_unif = compute_auc(typical_ts_in * -1, typical_ts_ood * -1)
+    print(f'UNIF: {auc_unif}')
 
 
 if __name__ == '__main__':

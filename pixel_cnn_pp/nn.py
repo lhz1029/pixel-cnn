@@ -87,8 +87,7 @@ def discretized_mix_logistic_loss(x,l,sum_all=True):
     else:
         return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])
 
-
-def continuous_mix_logistic_loss(x,l,sum_all=True):
+def get_params_from_l(x, l, sum_all=True):
     xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
     ls = int_shape(l) # predicted distribution, e.g. (B,32,32,100)
     nr_mix = int(ls[-1] / 10) # here and below: unpacking the params of the mixture of logistics
@@ -102,6 +101,11 @@ def continuous_mix_logistic_loss(x,l,sum_all=True):
     m3 = tf.reshape(means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] + coeffs[:, :, :, 2, :] * x[:, :, :, 1, :], [xs[0],xs[1],xs[2],1,nr_mix])  # (B,32,32,1,10)
     means = tf.concat([tf.reshape(means[:,:,:,0,:], [xs[0],xs[1],xs[2],1,nr_mix]), m2, m3],3)  # (B,32,32,3,10)
     scales = tf.exp(log_scales)  # (B,32,32,3,10)
+    return means, scales, logit_probs, x
+
+def continuous_mix_logistic_loss(x,l,sum_all=True):
+    # x is now (B,32,32,3,10)
+    means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
     logistic = tfp.distributions.Logistic(loc=means, scale=scales)
     logit_prob_shape = int_shape(logit_probs)
     return tf.math.reduce_sum(logistic.prob(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
@@ -127,6 +131,21 @@ def sample_from_discretized_mix_logistic(l,nr_mix):
     x1 = tf.minimum(tf.maximum(x[:,:,:,1] + coeffs[:,:,:,0]*x0, -1.), 1.)
     x2 = tf.minimum(tf.maximum(x[:,:,:,2] + coeffs[:,:,:,1]*x0 + coeffs[:,:,:,2]*x1, -1.), 1.)
     return tf.concat([tf.reshape(x0,xs[:-1]+[1]), tf.reshape(x1,xs[:-1]+[1]), tf.reshape(x2,xs[:-1]+[1])],3)
+
+def cdf_transform_discretized(x,l,sum_all=True):
+    means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
+    logistic = tfp.distributions.Logistic(loc=means, scale=scales)
+    logit_prob_shape = int_shape(logit_probs)
+    cdf_mins = logistic.cdf(tf.math.maximum(x - 1, 0))
+    cdf_maxes = logistic.cdf(x)
+    cdf_range = tfp.distributions.Uniform(cdf_mins, cdf_maxes)
+    return tf.math.reduce_sum(cdf_range.sample() * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
+
+def cdf_transform_continuous(x,l,sum_all=True):
+    means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
+    logistic = tfp.distributions.Logistic(loc=means, scale=scales)
+    logit_prob_shape = int_shape(logit_probs)
+    return tf.math.reduce_sum(logistic.cdf(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
 
 def get_var_maybe_avg(var_name, ema, **kwargs):
     ''' utility for retrieving polyak averaged params '''
