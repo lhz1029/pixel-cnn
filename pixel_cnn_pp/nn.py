@@ -108,7 +108,11 @@ def continuous_mix_logistic_loss(x,l,sum_all=True):
     means, scales, logit_probs, x = get_params_from_l(x, l, sum_all)
     logistic = tfp.distributions.Logistic(loc=means, scale=scales)
     logit_prob_shape = int_shape(logit_probs)
-    return tf.math.reduce_sum(logistic.prob(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
+    return tfp.distributions.MixtureSameFamily(
+        cat=tfp.distributions.Categorical(probs=tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:])),
+        components_distribution=logistic
+    ).log_prob(x)
+    # return tf.math.reduce_sum(logistic.prob(x) * tf.reshape(logit_probs, logit_prob_shape[:-1] + [1] + logit_prob_shape[-1:]), axis=-1)   # (B,32,32,3)
 
 def sample_from_discretized_mix_logistic(l,nr_mix):
     ls = int_shape(l)

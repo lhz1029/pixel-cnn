@@ -55,7 +55,7 @@ def load(data_dir, subset='train'):
 class DataLoader(object):
     """ an object that generates batches of CIFAR-10 data for training """
 
-    def __init__(self, data_dir, subset, batch_size, rng=None, shuffle=False, return_labels=False):
+    def __init__(self, data_dir, subset, batch_size, rng=None, shuffle=False, return_labels=False, small_test=False):
         """ 
         - data_dir is location where to store files
         - subset is train|test 
@@ -75,6 +75,9 @@ class DataLoader(object):
 
         # load CIFAR-10 training data to RAM
         self.data, self.labels = load(os.path.join(data_dir,'cifar-10-python'), subset=subset)
+        if small_test:
+            self.data = self.data[:10]
+            self.labels = self.labels[:10]
         self.data = np.transpose(self.data, (0,2,3,1)) # (N,3,32,32) -> (N,32,32,3)
         
         self.p = 0 # pointer to where we are in iteration

@@ -104,9 +104,16 @@ parser.add_argument('-c', '--class_conditional', dest='class_conditional', actio
 parser.add_argument('-ed', '--energy_distance', dest='energy_distance', action='store_true', help='use energy distance in place of likelihood')
 parser.add_argument('-cl', '--continuous_logistic', dest='continuous_logistic', action='store_true', help='use logistic instead of discretized and bounded logistic')
 # optimization
+parser.add_argument('-l', '--learning_rate', type=float, default=0.001, help='Base learning rate')
+parser.add_argument('-e', '--lr_decay', type=float, default=0.999995, help='Learning rate decay, applied every step of the optimization')
+parser.add_argument('-b', '--batch_size', type=int, default=16, help='Batch size during training per GPU')
+parser.add_argument('-u', '--init_batch_size', type=int, default=16, help='How much data to use for data-dependent initialization.')
+parser.add_argument('-p', '--dropout_p', type=float, default=0.5, help='Dropout strength (i.e. 1 - keep_prob). 0 = No dropout, higher = more dropout.')
+parser.add_argument('-x', '--max_epochs', type=int, default=5000, help='How many epochs to run in total?')
 parser.add_argument('-g', '--nr_gpu', type=int, default=8, help='How many GPUs to distribute the training across?')
 # reproducibility
 parser.add_argument('-s', '--seed', type=int, default=1, help='Random seed to use')
+parser.add_argument('-t', '--small_test', dest='small_test', action='store_true', help='test on small data')
 args = parser.parse_args()
 
 rng = np.random.RandomState(args.seed)
@@ -215,6 +222,63 @@ def distance_from_unif(samples, test='ks'):
         ts -= n
         return ts
 
+
+def time_series_test(
+    inl_train_fea, inl_test_fea, oul_fea, test_typ, Bsz=1, Nsamples=None,
+    L=100, SK=1):
+    """
+    From https://github.com/thu-ml/ood-dgm/blob/master/pixelcnn/ardgm_tests.ipynb
+    :param Bsz: batch size in a multi-sample test (as in the multi-sample typicality test, arXiv:1906.02994).
+    :param SK: only include lags which are multiples of SK in the test
+    :param L: the maximum lag to use
+    """
+    oul_fea = normalize_feature(inl_train_fea, oul_fea)
+    inl_fea = normalize_feature(inl_train_fea, inl_test_fea)
+    oul_stats, _ = get_autocorr(oul_fea, Nsamples, L, test_typ, SK)
+    inl_stats, _ = get_autocorr(inl_fea, Nsamples, L, test_typ, SK)
+    return inl_stats, oul_stats
+
+
+def normalize_feature(inl_train, ood, batch_dims=1):
+    inl_train = inl_train.reshape([np.prod(inl_train.shape[:batch_dims]), -1])
+    ood = ood.reshape([np.prod(ood.shape[:batch_dims]), -1])
+    _mean = inl_train.mean(axis=0)[None]
+    _sd = inl_train.std(axis=0)[None]
+    return (ood - _mean) / _sd
+
+def autocorr5(x, lags):
+    '''
+    adapted from https://stackoverflow.com/a/51168178/7509266
+    Fixed the incorrect denominator: np.correlate(x,x,'full')[d-1+k] returns
+        sum_{i=k}^{d-1} x[i]x[i-k]
+    so we should divide it by (d-k) instead of d
+    '''
+    mean=x.mean()
+    var=np.var(x)
+    xp=x-mean
+    ruler = len(x) - np.arange(len(x))
+    corr=np.correlate(xp,xp,'full')[len(x)-1:]/var/ruler
+    return corr[:(lags)]
+
+def get_autocorr(fea, B=None, L=200, test_typ='bp', skip_corr=1):
+    idcs = np.arange(fea.shape[0])
+    if B is not None:
+        np.random.shuffle(idcs)
+    else:
+        B = idcs.shape[0]
+    corrs = []
+    N = fea[0].shape[0]
+    for j in range(B):
+        ac_j = autocorr5(fea[idcs[j]], L)
+        corrs.append(ac_j)
+    corrs = np.array(corrs)[:,::skip_corr]
+    if test_typ == 'ljb':
+        ruler = (N - np.arange(1, L+1))[None, ::skip_corr].astype('f')
+        stats = N * (N+2) * (corrs[:,1:]**2 / ruler[:,1:]).mean(axis=-1)  # normalized; *L would follow ChiSq[L]
+    else:
+        stats = N * (corrs[:,1:]**2).astype('f').mean(axis=-1)
+    return stats, corrs
+
 def main():
     # # write results to file
     # out_dir = os.path.join(args.exp + '_save_dir', 'results')
@@ -222,35 +286,53 @@ def main():
     # Path(out_dir).mkdir(exist_ok=True)
     # out_f = os.path.join(out_dir, 'run%s.txt' % args.suffix)
     # load model
+    tf.logging.set_verbosity(tf.logging.INFO)
+    name = "_".join([args.in_data, args.ood_data, args.ckpt_file])
     model = tf.make_template('model', model_spec)
+    tf.logging.log(tf.logging.INFO, 'initializing')
     initializer = tf.global_variables_initializer()
+    tf.logging.log(tf.logging.INFO, 'initialized model')
     # LR
     log_probs_in = get_log_probs(model, args, args.in_data, 'test')
+    np.save(name + '_log_probs_in.npy', log_probs_in)
     log_probs_ood = get_log_probs(model, args, args.ood_data, 'test')
+    np.save(name + '_log_probs_ood.npy', log_probs_ood)
     complexity_in = get_complexity(args, args.in_data, 'test')
     complexity_ood = get_complexity(args, args.ood_data, 'test')
     auc, auc_llr = compute_auc_llr(log_probs_in, log_probs_ood, complexity_in, complexity_ood)
-    print(f'LL: {auc}')
-    print(f'LR: {auc_llr}')
+    tf.logging.log(tf.logging.INFO, f'LL: {auc}')
+    tf.logging.log(tf.logging.INFO, f'LR: {auc_llr}')
+    with open(f'results/{name}.txt', 'a') as f:
+        f.write(f'LL: {auc}\n')
+        f.write(f'LR: {auc_llr}\n')
     # TT
-    train_log_probs = get_log_probs(model, args, args.in_data, 'train')
-    train_entropy = get_entropy(train_log_probs)  # TODO
+    log_probs_train = get_log_probs(model, args, args.in_data, 'train')
+    np.save(name + '_log_probs_train.npy', log_probs_train)
+    train_entropy = get_entropy(log_probs_train)
     typical_ts_in = list(map(abs, log_probs_in - train_entropy))
     typical_ts_ood = list(map(abs, log_probs_ood - train_entropy))
     # want higher to be better
     auc_tt = compute_auc(typical_ts_in * -1, typical_ts_ood * -1)
-    print(f'TT: {auc_tt}')
+    tf.logging.log(tf.logging.INFO, f'TT: {auc_tt}')
+    with open(f'results/{name}.txt', 'a') as f:
+        f.write(f'TT: {auc_tt}')
     # WN
-    # TODO https://github.com/thu-ml/ood-dgm/blob/master/pixelcnn/ardgm_tests.ipynb
-
+    wn_in, wn_ood = time_series_test(log_probs_train, log_probs_in, log_probs_ood, 'bp')
+    auc_wn = compute_auc(wn_in * -1, wn_ood * -1)
+    print(f'WN: {auc_wn}')
+    with open(f'results/{name}.txt', 'a') as f:
+        f.write(f'UNIF: {auc_wn}')
     # UNIF
     unifs_in = get_cdf_transform(model, args, args.in_data, 'test')
     unifs_ood = get_cdf_transform(model, args, args.ood_data, 'test')
-    gof_ts_in = distance_from_unif(unifs_in, 'ks')
-    gof_ts_ood = distance_from_unif(unifs_ood, 'ks')
-    # want higher to be better
-    auc_unif = compute_auc(typical_ts_in * -1, typical_ts_ood * -1)
-    print(f'UNIF: {auc_unif}')
+    for metric in ['ks', 'cvm', 'ad']:
+        gof_ts_in = distance_from_unif(unifs_in, metric)
+        gof_ts_ood = distance_from_unif(unifs_ood, metric)
+        # want higher to be better
+        auc_unif = compute_auc(gof_ts_in * -1, gof_ts_ood * -1)
+        print(f'UNIF: {auc_unif}')
+        with open(f'results/{name}.txt', 'a') as f:
+            f.write(f'UNIF {metric}: {auc_unif}')
 
 
 if __name__ == '__main__':
