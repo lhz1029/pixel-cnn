@@ -75,10 +75,10 @@ class DataLoader(object):
 
         # load CIFAR-10 training data to RAM
         self.data, self.labels = load(os.path.join(data_dir,'cifar-10-python'), subset=subset)
-        if small_test:
-            self.data = self.data[:10]
-            self.labels = self.labels[:10]
         self.data = np.transpose(self.data, (0,2,3,1)) # (N,3,32,32) -> (N,32,32,3)
+        if small_test:
+            self.data = self.data[:50]
+            self.labels = self.labels[:50]
         
         self.p = 0 # pointer to where we are in iteration
         self.rng = np.random.RandomState(1) if rng is None else rng
