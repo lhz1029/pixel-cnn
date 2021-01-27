@@ -248,10 +248,18 @@ def get_preds(model, args, dataset, eval_mode, func):
                 sample = sample_from_model(sess)
                 print(sample.min(), sample.max())
                 sample_x.append(sample)
-    # return train_losses
-    sample_x = np.concatenate(sample_x, axis=0)
-    np.save('sample_x.npy', sample_x)
-    return sample_x
+            # return train_losses
+            sample_x = np.concatenate(sample_x, axis=0)
+            np.save('sample_x.npy', sample_x)
+            for x in sample_x:
+                # feed_dict = make_feed_dict(d, obs_shape)
+                print(x.min(), x.max())
+                x = np.cast[np.float32]((x - 127.5) / 127.5)
+                feed_dict = {xs[i]: x}
+                out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
+                l = sess.run(func(xs[i], out, sum_all='pixel'), feed_dict)
+            train_losses.extend(l)
+    return train_losses
     # return all_log_probs, all_ar_resids, all_cdf_transform
 
 def get_entropy(log_probs):
