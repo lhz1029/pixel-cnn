@@ -59,6 +59,17 @@ def compute_auc(neg, pos, pos_label=1):
     else:
         return 1 - auc
 
+# def compute_auc_for_s_scores(scores_ood, scores_itd):
+#     # Assumes scores a should be higher
+#     auc = metrics.roc_auc_score(
+#         np.concatenate((np.ones_like(scores_ood),
+#                        np.zeros_like(scores_itd)),
+#                       axis=0),
+#         np.concatenate((scores_ood,
+#                        scores_itd,),
+#                       axis=0))
+#     return auc
+
 def compute_auc_llr(preds_in, preds_ood, preds0_in, preds0_ood):
     """Compute AUC for LLR."""
     # evaluate AUROC for OOD detection
@@ -174,6 +185,15 @@ def get_preds(model, args, dataset, eval_mode, func):
     xs = [tf.placeholder(tf.float32, shape=(args.batch_size, ) + obs_shape) for i in range(args.nr_gpu)]
     x_init = tf.placeholder(tf.float32, shape=(args.init_batch_size,) + obs_shape)
 
+    def sample_from_model(sess):
+        x_gen = [np.zeros((args.batch_size,) + obs_shape, dtype=np.float32) for i in range(args.nr_gpu)]
+        for yi in range(obs_shape[0]):
+            for xi in range(obs_shape[1]):
+                new_x_gen_np = sess.run(new_x_gen, {xs[i]: x_gen[i] for i in range(args.nr_gpu)})
+                for i in range(args.nr_gpu):
+                    x_gen[i][:,yi,xi,:] = new_x_gen_np[i][:,yi,xi,:]
+        return np.concatenate(x_gen, axis=0)
+
     def make_feed_dict(data, obs_shape, init=False):
         if type(data) is tuple:
             x,y = data
@@ -209,18 +229,29 @@ def get_preds(model, args, dataset, eval_mode, func):
         with tf.device('/gpu:%d' % i):
             # l = sess.run(func(next_element, out))
             # train_losses.append(l)
+            new_x_gen = []
             for x in data:
                 # feed_dict = make_feed_dict(d, obs_shape)
                 x = np.cast[np.float32]((x - 127.5) / 127.5)
                 feed_dict = {xs[i]: x}
                 out = model(xs[i], hs[i], ema=None, dropout_p=0, **model_opt)
-                # log_probs, ar_resids, cdf_transform = sess.run(func(xs[i], out, sum_all='pixel'), feed_dict)
+                new_x_gen.append(nn.sample_from_discretized_mix_logistic(out, args.nr_logistic_mix))
+                # log_probs, ar_resids, cdf_transform = sess.run(func(xs[i], out, sum_all='all'), feed_dict)
                 # all_log_probs.extend(log_probs)
                 # all_ar_resids.extend(ar_resids)
                 # all_cdf_transform.extend(cdf_transform)
-                l = sess.run(func(xs[i], out, sum_all='image'), feed_dict)
-                train_losses.extend(l)
-    return train_losses
+
+                # l = sess.run(func(xs[i], out, sum_all='pixel'), feed_dict)
+                # train_losses.extend(l)
+            sample_x = []
+            for _ in range(50):
+                sample = sample_from_model(sess)
+                print(sample.min(), sample.max())
+                sample_x.append(sample)
+    # return train_losses
+    sample_x = np.concatenate(sample_x, axis=0)
+    np.save('sample_x.npy', sample_x)
+    return sample_x
     # return all_log_probs, all_ar_resids, all_cdf_transform
 
 def get_entropy(log_probs):
@@ -310,6 +341,7 @@ def get_autocorr(fea, B=None, L=200, test_typ='bp', skip_corr=1):
         stats = N * (corrs[:,1:]**2).astype('f').mean(axis=-1)
     return stats, corrs
 
+
 def main():
     # # write results to file
     # out_dir = os.path.join(args.exp + '_save_dir', 'results')
@@ -326,15 +358,23 @@ def main():
     tf.logging.log(tf.logging.INFO, 'initializing')
     initializer = tf.global_variables_initializer()
     tf.logging.log(tf.logging.INFO, 'initialized model')
-    # LR
+
+    # log_probs_in, ar_in, cdfs_in = get_preds(model, args, args.in_data, 'test', log_prob_func)
+    # log_probs_ood, ar_ood, cdfs_ood = get_preds(model, args, args.ood_data, 'test', log_prob_func)
+    # log_probs_train, ar_train, cdfs_train = get_preds(model, args, args.in_data, 'train', log_prob_func)
+
+    # # # LR
     # log_probs_pixel_in = get_log_probs(model, args, args.in_data, 'test')  # (N,32,32,3)
-    # log_probs_in = np.mean(log_probs_pixel_in, axis=(1, 2, 3))
+    # log_probs_in = np.mean(log_probs_pixel_in, axis=(1, 2))
     # np.save('intermediate/' + name + '_log_probs_in.npy', log_probs_in)
     # log_probs_pixel_ood = get_log_probs(model, args, args.ood_data, 'test')
-    # log_probs_ood = np.mean(log_probs_pixel_ood, axis=(1, 2, 3))
+    # log_probs_ood = np.mean(log_probs_pixel_ood, axis=(1, 2))
     # np.save('intermediate/' + name + '_log_probs_ood.npy', log_probs_ood)
+
     # complexity_in = get_complexity(args, args.in_data, 'test')
     # complexity_ood = get_complexity(args, args.ood_data, 'test')
+    # np.save('intermediate/' + name + '_complexity_ood.npy', complexity_ood)
+    # np.save('intermediate/' + name + '_complexity_ood.npy', complexity_ood)
     # print(log_probs_in, log_probs_ood)
     # print(len(log_probs_in),len(log_probs_ood),len(complexity_in), len(complexity_ood))
     # auc, auc_llr = compute_auc_llr(log_probs_in, log_probs_ood, complexity_in, complexity_ood)
@@ -343,10 +383,11 @@ def main():
     # with open(f'results/{name}.txt', 'a') as f:
     #     f.write(f'LL: {auc}\n')
     #     f.write(f'LR: {auc_llr}\n')
-    # # TT
+    # # # # TT
     # log_probs_pixel_train = get_log_probs(model, args, args.in_data, 'train')
-    # log_probs_train = np.mean(log_probs_pixel_train, axis=(1, 2, 3))
+    # log_probs_train = np.mean(log_probs_pixel_train, axis=(1, 2))
     # np.save('intermediate/' + name + '_log_probs_train.npy', log_probs_train)
+
     # train_entropy = get_entropy(log_probs_train)
     # typical_ts_in = list(map(abs, log_probs_in - train_entropy))
     # typical_ts_ood = list(map(abs, log_probs_ood - train_entropy))
@@ -357,8 +398,12 @@ def main():
     # tf.logging.log(tf.logging.INFO, f'TT: {auc_tt}')
     # with open(f'results/{name}.txt', 'a') as f:
     #     f.write(f'TT: {auc_tt}')
-    # # WN
-    # wn_in, wn_ood = time_series_test(np.array(log_probs_pixel_train), np.array(log_probs_pixel_in), np.array(log_probs_pixel_ood), 'bp')
+    # # # WN
+    # ar_in = get_ar(model, args, args.in_data, 'test')
+    # ar_ood = get_ar(model, args, args.ood_data, 'test')
+    # ar_train = get_ar(model, args, args.in_data, 'train')
+
+    # wn_in, wn_ood = time_series_test(np.array(ar_train), np.array(ar_in), np.array(ar_ood), 'bp')
     # print(len(wn_in), len(wn_ood))
     # auc_wn = compute_auc(wn_in * -1, wn_ood * -1)
     # print(f'WN: {auc_wn}')
@@ -366,17 +411,22 @@ def main():
     #     f.write(f'UNIF: {auc_wn}')
     # UNIF
     unifs_in = get_cdf_transform(model, args, args.in_data, 'test')  # (B,32,32,3)
-    unifs_ood = get_cdf_transform(model, args, args.ood_data, 'test')
+    np.save('intermediate/' + name + '_unifs_samples.npy', unifs_in)
+    # unifs_in = get_cdf_transform(model, args, args.in_data, 'test')  # (B,32,32,3)
+    # np.save('intermediate/' + name + '_unifs_in.npy', unifs_in)
+    # unifs_ood = get_cdf_transform(model, args, args.ood_data, 'test')
+    # np.save('intermediate/' + name + '_unifs_ood.npy', unifs_ood)
+    # unifs_train = get_cdf_transform(model, args, args.in_data, 'train')
+    # np.save('intermediate/' + name + '_unifs_train.npy', unifs_train)
     # for metric in ['ks', 'cvm', 'ad']:
-    for metric in ['ad']:
-        gof_ts_in = distance_from_unif(unifs_in, metric).flatten()
-        gof_ts_ood = distance_from_unif(unifs_ood, metric).flatten()
-        print(len(gof_ts_in), len(gof_ts_ood))
-        # want higher to be better
-        auc_unif = compute_auc(gof_ts_in * -1, gof_ts_ood * -1)
-        print(f'UNIF: {auc_unif}')
-        with open(f'results/{name}.txt', 'a') as f:
-            f.write(f'UNIF {metric}: {auc_unif}')
+    #     gof_ts_in = distance_from_unif(unifs_in, metric).flatten()
+    #     gof_ts_ood = distance_from_unif(unifs_ood, metric).flatten()
+    #     print(len(gof_ts_in), len(gof_ts_ood))
+    #     # want higher to be better
+    #     auc_unif = compute_auc(gof_ts_in * -1, gof_ts_ood * -1)
+    #     print(f'UNIF: {auc_unif}')
+    #     with open(f'results/{name}.txt', 'a') as f:
+    #         f.write(f'UNIF {metric}: {auc_unif}')
 
 
 if __name__ == '__main__':

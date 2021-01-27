@@ -82,15 +82,18 @@ def discretized_mix_logistic_loss(x,l,sum_all='batch'):
     log_probs = tf.where(x < -0.999, log_cdf_plus, tf.where(x > 0.999, log_one_minus_cdf_min, tf.where(cdf_delta > 1e-5, tf.log(tf.maximum(cdf_delta, 1e-12)), log_pdf_mid - np.log(127.5))))
 
     if sum_all == 'batch':
+        # negative since we want to minimize loss
         log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
         return -tf.reduce_sum(log_sum_exp(log_probs))  # (1)
     elif sum_all == 'image':
         log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
-        return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])  # (B)
+        return tf.reduce_sum(log_sum_exp(log_probs),[1,2])  # (B)
     elif sum_all == 'pixel':
         log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
-        return -log_sum_exp(log_probs)  # (B,32,32)
+        return log_sum_exp(log_probs)  # (B,32,32)
     elif sum_all == 'residual':
+        log_mixture_coef = log_prob_from_logits(logit_probs)
+        log_probs_given_c_mi = log_probs
         p_mi_given_c = tf.exp(log_mixture_coef)  # P(MixtureIndicator_{i,j} | Context_{i,j})
         ar_residual_r = tf.reduce_sum(centered_x[:,:,:,0] * p_mi_given_c, axis=-1, keepdims=True)
         p_mi_given_cr = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0], axis=-1)
@@ -103,6 +106,8 @@ def discretized_mix_logistic_loss(x,l,sum_all='batch'):
         log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)  # (B,32,32,10)
         log_probs = -tf.reduce_sum(log_sum_exp(log_probs),[1,2])  # (B)
 
+        log_mixture_coef = log_prob_from_logits(logit_probs)
+        log_probs_given_c_mi = log_probs
         p_mi_given_c = tf.exp(log_mixture_coef)  # P(MixtureIndicator_{i,j} | Context_{i,j})
         ar_residual_r = tf.reduce_sum(centered_x[:,:,:,0] * p_mi_given_c, axis=-1, keepdims=True)
         p_mi_given_cr = tf.nn.softmax(log_mixture_coef + log_probs_given_c_mi[:,:,:,0], axis=-1)
